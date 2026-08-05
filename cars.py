@@ -123,6 +123,9 @@ class Car:
         self.parking_tile = None
         self._park_timer = 0.0
 
+        self._locks = {}
+        self._chokepoint_tiles = {house.entrance_tile, *shop.entrance_tiles}
+
     def update(self, dt):
         if self.done:
             return
@@ -163,11 +166,18 @@ class Car:
         return None
 
     def _can_enter_next_tile(self, nxt, nxt_tile):
-        """Every tile enforces one-car-at-a-time occupancy — this is what
-        makes cars queue up single-file instead of stacking on each
-        other. Intersections additionally consult a traffic light or
-        roundabout controller before occupancy is even checked."""
-        if nxt_tile is not None and nxt_tile.is_intersection():
+        """Every tile — including intersections — is lane-keyed by
+        direction of travel: a car only ever queues behind another car
+        going the SAME way through that tile. Cross traffic and opposing
+        traffic never block each other here at all; that's entirely the
+        traffic light's/roundabout's job to arbitrate. The one exception
+        is a chokepoint tile (a house/shop entrance), which is a literal
+        single point a car enters/exits parking through and stays
+        whole-tile locked regardless of direction."""
+        is_intersection = nxt_tile is not None and nxt_tile.is_intersection()
+        is_chokepoint = nxt in self._chokepoint_tiles
+
+        if is_intersection:
             traffic_light_manager = self.context.traffic_light_manager
             if traffic_light_manager is not None:
                 light = traffic_light_manager.get(nxt)
@@ -180,22 +190,46 @@ class Car:
             if roundabout_manager is not None:
                 roundabout = roundabout_manager.get(nxt)
                 if roundabout is not None:
-                    return roundabout.request_enter(self)
+                    if roundabout.request_enter(self):
+                        self._locks[nxt] = ('roundabout', None)
+                        return True
+                    return False
 
-        occupant = self.context.tile_occupants.get(nxt)
+        if is_chokepoint:
+            occupant = self.context.tile_occupants.get(nxt)
+            if occupant is not None and occupant is not self:
+                return False
+            self.context.tile_occupants[nxt] = self
+            self._locks[nxt] = ('tile', None)
+            return True
+
+        travel_direction = self._direction_from_offset(self.current_tile, nxt)
+        lane_key = (nxt, travel_direction)
+        occupant = self.context.lane_occupants.get(lane_key)
         if occupant is not None and occupant is not self:
             return False
-        self.context.tile_occupants[nxt] = self
+        self.context.lane_occupants[lane_key] = self
+        self._locks[nxt] = ('lane', travel_direction)
         return True
 
     def _release_tile(self, tile_pos):
-        roundabout_manager = self.context.roundabout_manager
-        if roundabout_manager is not None:
-            roundabout = roundabout_manager.get(tile_pos)
-            if roundabout is not None:
-                roundabout.exit(self)
-        if self.context.tile_occupants.get(tile_pos) is self:
-            del self.context.tile_occupants[tile_pos]
+        lock = self._locks.pop(tile_pos, None)
+        if lock is None:
+            return
+        lock_type, key = lock
+        if lock_type == 'tile':
+            if self.context.tile_occupants.get(tile_pos) is self:
+                del self.context.tile_occupants[tile_pos]
+        elif lock_type == 'lane':
+            lane_key = (tile_pos, key)
+            if self.context.lane_occupants.get(lane_key) is self:
+                del self.context.lane_occupants[lane_key]
+        elif lock_type == 'roundabout':
+            roundabout_manager = self.context.roundabout_manager
+            if roundabout_manager is not None:
+                roundabout = roundabout_manager.get(tile_pos)
+                if roundabout is not None:
+                    roundabout.exit(self)
 
     def _update_road_travel(self, dt):
         board = self.context.board
@@ -271,6 +305,7 @@ class Car:
         if occupant is not None and occupant is not self:
             return  # entrance's busy — stay parked a little longer
         self.context.tile_occupants[entrance_tile] = self
+        self._locks[entrance_tile] = ('tile', None)
         self.shop.release_parking(self.parking_tile)
         self.state = Car.STATE_EXIT_PARK
 

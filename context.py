@@ -41,3 +41,4 @@ class GameContext:
         # may only move into a locked tile that's not in here (or that it
         # already owns) — see Car._tile_needs_lock in cars.py.
         self.tile_occupants = {}
+        self.lane_occupants = {}
