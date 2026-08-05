@@ -133,28 +133,51 @@ class Shop(Building):
             anchor = parking[0]
             entrance = (anchor[0] + perp_dx, anchor[1] + perp_dy)
 
-            self.sides.append({'side': side, 'parking': parking, 'entrance': entrance})
+            self.sides.append({'side': side, 'parking': parking, 'entrance': entrance, 'occupied_slots': set()})
             ground_tiles += parking + [entrance]
             blocked_tiles += parking
 
         self.blocked_tiles = blocked_tiles
         color_tiles = building
-        self.parking_status = {tile: None for s in self.sides for tile in s['parking']}
         return ground_tiles, color_tiles
+
+    PARKING_CAPACITY_PER_SIDE = 3
 
     def reserve_parking(self, entrance_tile):
         side = next((s for s in self.sides if s['entrance'] == entrance_tile), None)
         if side is None:
             return None
-        for tile in side['parking']:
-            if self.parking_status.get(tile) is None:
-                self.parking_status[tile] = True
-                return tile
+        for slot in range(self.PARKING_CAPACITY_PER_SIDE):
+            if slot not in side['occupied_slots']:
+                side['occupied_slots'].add(slot)
+                return (side['side'], slot)
         return None
 
-    def release_parking(self, tile):
-        if tile in self.parking_status:
-            self.parking_status[tile] = None
+    def release_parking(self, token):
+        if token is None:
+            return
+        side_name, slot = token
+        side = next((s for s in self.sides if s['side'] == side_name), None)
+        if side is not None:
+            side['occupied_slots'].discard(slot)
+
+    def parking_position(self, token):
+        """Pixel position for a reserved slot — 3 slots spread evenly
+        across the 2-tile pad's long axis so they render as visibly
+        separate spots instead of stacking on the 2 tile centers."""
+        side_name, slot = token
+        side = next(s for s in self.sides if s['side'] == side_name)
+        t0, t1 = side['parking']
+        board = self.board
+        r0, r1 = board.tile_rect(*t0), board.tile_rect(*t1)
+        bound = r0.unionall([r1])
+        if t0[1] == t1[1]:  # horizontal pad (top/bottom sides)
+            x = bound.left + bound.width * (slot + 0.5) / self.PARKING_CAPACITY_PER_SIDE
+            y = bound.centery
+        else:  # vertical pad (left/right sides)
+            x = bound.centerx
+            y = bound.top + bound.height * (slot + 0.5) / self.PARKING_CAPACITY_PER_SIDE
+        return (x, y)
 
     @property
     def entrance_tiles(self):

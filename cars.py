@@ -109,8 +109,13 @@ class Car:
         self.route = self.outbound_route
         self.route_index = 0
 
+        self._locks = {}
+        self._chokepoint_tiles = {house.entrance_tile, *shop.entrance_tiles}
+        self.shop_entrance_tile = self.outbound_route[-1]
+
         self.current_tile = self.route[0]
         context.tile_occupants[self.current_tile] = self
+        self._locks[self.current_tile] = ('tile', None)
         self.pos = list(board.tile_center(*self.current_tile))
         self.state = Car.STATE_TO_SHOP
         self.done = False
@@ -122,18 +127,15 @@ class Car:
 
         self.parking_tile = None
         self._park_timer = 0.0
-
-        self._locks = {}
-        self._chokepoint_tiles = {house.entrance_tile, *shop.entrance_tiles}
-
+        
     def update(self, dt):
         if self.done:
             return
         if self.state in (Car.STATE_TO_SHOP, Car.STATE_RETURNING):
             self._update_road_travel(dt)
         elif self.state == Car.STATE_ENTER_PARK:
-            board = self.context.board
-            self._update_direct(dt, board.tile_center(*self.parking_tile), self._on_parked)
+            target = self.shop.parking_position(self.parking_tile)
+            self._update_direct(dt, target, self._on_parked)
         elif self.state == Car.STATE_PARKED:
             self._park_timer -= dt
             if self._park_timer <= 0:
@@ -196,13 +198,18 @@ class Car:
                     return False
 
         if is_chokepoint:
+            if (self.state == Car.STATE_TO_SHOP and nxt == self.shop_entrance_tile
+                    and self.parking_tile is None):
+                self.parking_tile = self.shop.reserve_parking(nxt)
+                if self.parking_tile is None:
+                    return False  # lot's full — wait back on the road, not on the entrance
             occupant = self.context.tile_occupants.get(nxt)
             if occupant is not None and occupant is not self:
                 return False
             self.context.tile_occupants[nxt] = self
             self._locks[nxt] = ('tile', None)
             return True
-
+        
         travel_direction = self._direction_from_offset(self.current_tile, nxt)
         lane_key = (nxt, travel_direction)
         occupant = self.context.lane_occupants.get(lane_key)
@@ -268,9 +275,12 @@ class Car:
     def _on_route_complete(self):
         if self.state == Car.STATE_TO_SHOP:
             if self.parking_tile is None:
+                # Only hit when the route was length 1 (house entrance ==
+                # shop entrance), so _can_enter_next_tile's reservation
+                # never ran. Reserve here as a fallback.
                 self.parking_tile = self.shop.reserve_parking(self.current_tile)
                 if self.parking_tile is None:
-                    return  # every spot's full — hold at the entrance and keep checking
+                    return  # lot's full — hold at the entrance and keep checking
             self._release_tile(self.current_tile)
             self.state = Car.STATE_ENTER_PARK
         elif self.state == Car.STATE_RETURNING:
